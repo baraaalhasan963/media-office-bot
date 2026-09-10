@@ -3194,11 +3194,10 @@ async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
                     status_str = {"مقبول": "مقبول", "مرفوض": "مرفوض", "مُرجَع": "مُرجَع"}.get(row['status'], "محلول")
                     await query.answer(f"⚠️ تمت معالجة هذا الطلب سابقاً ({status_str}) بواسطة @{admin_name}.", show_alert=True)
                     if (row['request_type'] or 'تغطية') == 'استعارة':
-                        if (query.message.text or "").startswith("📦 <b>تفاصيل طلب استعارة"):
-                            try:
-                                await query.message.delete()
-                            except Exception:
-                                pass
+                        try:
+                            await query.message.delete()
+                        except Exception:
+                            pass
                         await _sync_borrow_board(context, notify=True)
                     else:
                         try:
@@ -3234,11 +3233,10 @@ async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
                 await db.commit()
 
             if request_type == 'استعارة':
-                if (query.message.text or "").startswith("📦 <b>تفاصيل طلب استعارة"):
-                    try:
-                        await query.message.delete()
-                    except Exception as e:
-                        logger.error(f"Error deleting borrow details after approve: {e}")
+                try:
+                    await query.message.delete()
+                except Exception as e:
+                    logger.error(f"Error deleting borrow details after approve: {e}")
                 await _sync_borrow_board(context, notify=True)
             else:
                 icon = "✅"
