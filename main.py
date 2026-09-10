@@ -1970,6 +1970,17 @@ async def _submit_borrow_request(update: Update, context: ContextTypes.DEFAULT_T
         logger.error(f"Error saving borrow request: {e}")
 
     if success:
+        # حذف اللوحة القديمة قبل إرسال رسالة التفاصيل
+        old_board_id = await db_app.get_setting("borrow_board_msg_id")
+        if old_board_id:
+            try:
+                await context.bot.delete_message(
+                    chat_id=config.ADMIN_CHAT_ID,
+                    message_id=int(old_board_id)
+                )
+            except Exception:
+                pass
+            await db_app.set_setting("borrow_board_msg_id", "")
         try:
             async with aiosqlite.connect(config.DB_PATH) as db:
                 db.row_factory = aiosqlite.Row
@@ -1991,7 +2002,6 @@ async def _submit_borrow_request(update: Update, context: ContextTypes.DEFAULT_T
                 await context.bot.send_message(**kwargs)
         except Exception as e:
             logger.error(f"Error sending borrow details to admin: {e}")
-        await _sync_borrow_board(context)
 
         await query.edit_message_text("✅ تم إرسال طلبك بنجاح! بانتظار موافقة الإدارة.", parse_mode="HTML")
     else:
@@ -3118,7 +3128,7 @@ async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
                 status_str = "مقبول" if req_data['status'] == 'مقبول' else "مرفوض"
                 await query.answer(f"⚠️ تمت معالجة هذا الطلب سابقاً ({status_str}) بواسطة @{admin_name}.", show_alert=True)
                 if (req_data['request_type'] or 'تغطية') == 'استعارة':
-                    await _sync_borrow_board(context)
+                    await _sync_borrow_board(context, notify=True)
                 else:
                     try:
                         icon = "✅" if req_data['status'] == 'مقبول' else "❌"
@@ -3189,7 +3199,7 @@ async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
                                 await query.message.delete()
                             except Exception:
                                 pass
-                        await _sync_borrow_board(context)
+                        await _sync_borrow_board(context, notify=True)
                     else:
                         try:
                             icon = {"مقبول": "✅", "مرفوض": "❌", "مُرجَع": "↩️"}.get(row['status'], "✅")
@@ -3229,7 +3239,7 @@ async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
                         await query.message.delete()
                     except Exception as e:
                         logger.error(f"Error deleting borrow details after approve: {e}")
-                await _sync_borrow_board(context)
+                await _sync_borrow_board(context, notify=True)
             else:
                 icon = "✅"
                 original_text = query.message.text or ""
@@ -3329,7 +3339,7 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
             f"✅ تم رفض الطلب <code>{req_id}</code> وإرسال السبب للمستخدم.",
             parse_mode="HTML"
         )
-        await _sync_borrow_board(context)
+        await _sync_borrow_board(context, notify=True)
         return
 
     # 0. التحقق من سبب رفض الطلب
