@@ -1,0 +1,10 @@
+python-telegram-bot[job-queue]
+aiosqlite
+google-generativeai
+groq
+pytz
+httpx
+openpyxl
+python-dotenv
+pytest
+pytest-asyncio
