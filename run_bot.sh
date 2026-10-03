@@ -4,25 +4,28 @@
 # Suitable for Linux VPS, PythonAnywhere, or Background Tasks
 # ==============================================================================
 
-set -e
-
 # Change to the bot repository root directory
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null 2>&1 && pwd )"
 cd "$DIR"
 
-# Activate Virtual Environment if present
-if [ -d "venv" ]; then
-    echo "Activating virtualenv (venv)..."
-    source venv/bin/activate
-elif [ -d ".venv" ]; then
-    echo "Activating virtualenv (.venv)..."
-    source .venv/bin/activate
+# Select Python binary directly from virtualenv to avoid system PATH conflicts
+PYTHON_BIN="python3"
+if [ -f "$DIR/venv/bin/python" ]; then
+    PYTHON_BIN="$DIR/venv/bin/python"
+    source "$DIR/venv/bin/activate" 2>/dev/null || true
+elif [ -f "$DIR/venv/bin/python3" ]; then
+    PYTHON_BIN="$DIR/venv/bin/python3"
+    source "$DIR/venv/bin/activate" 2>/dev/null || true
+elif [ -f "$DIR/.venv/bin/python" ]; then
+    PYTHON_BIN="$DIR/.venv/bin/python"
+    source "$DIR/.venv/bin/activate" 2>/dev/null || true
 fi
 
+echo "Using Python binary: $PYTHON_BIN"
 echo "Starting Media Office Bot in auto-restart loop..."
 
 while true; do
-    python3 main.py
+    "$PYTHON_BIN" main.py
     EXIT_CODE=$?
     if [ $EXIT_CODE -eq 0 ]; then
         echo "Bot process exited cleanly (code 0). Stopping."
