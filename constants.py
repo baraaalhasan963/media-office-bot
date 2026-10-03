@@ -20,6 +20,8 @@ class State(IntEnum):
     BORROW_BORROWER = auto()
     BORROW_REASON = auto()
     BORROW_PHONE = auto()
+    BORROW_START_DATE = auto()
+    BORROW_START_TIME = auto()
     BORROW_RETURN_DATE = auto()
     BORROW_RETURN_TIME = auto()
     BORROW_CONFIRMATION = auto()

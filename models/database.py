@@ -181,6 +181,25 @@ async def _run_migrations(db):
             pass
         await mark_applied(5)
 
+    # v6: Borrow lifecycle enhancements (start date/time, unit ID, inspection, extensions)
+    if not await is_applied(6):
+        new_cols = [
+            ("start_date", "TEXT"),
+            ("start_time", "TEXT"),
+            ("asset_unit_id", "TEXT"),
+            ("inspection_note", "TEXT"),
+            ("extension_status", "TEXT"),
+            ("extension_date", "TEXT"),
+            ("extension_time", "TEXT"),
+            ("extension_reason", "TEXT"),
+        ]
+        for col, col_type in new_cols:
+            try:
+                await db.execute(f"ALTER TABLE requests ADD COLUMN {col} {col_type}")
+            except aiosqlite.OperationalError:
+                pass
+        await mark_applied(6)
+
 async def init_db():
     db = await get_db()
     await db.execute("PRAGMA journal_mode=WAL;")
@@ -302,15 +321,19 @@ async def save_borrow_request(data: dict, db: aiosqlite.Connection = None, commi
                     id, user_id, department, event_name, event_type, objective,
                     date, time, end_time, start_time_24, end_time_24, location,
                     coverage_type, importance, contact_name, phone, telegram,
-                    external_media, notes, request_type, status, borrow_qty
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'معلق', ?)""",
+                    external_media, notes, request_type, status, borrow_qty,
+                    start_date, start_time, asset_unit_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'معلق', ?, ?, ?, ?)""",
                 (
                     data["id"], data["user_id"], "", data["item"], "", data["reason"],
                     data["return_date"], data["return_time"], "",
                     time_to_24(data.get("return_time")), "", "",
                     json.dumps([], ensure_ascii=False), "", data["borrower_name"],
                     data["phone"], "", "لا", "", "استعارة",
-                    int(data.get("borrow_qty") or 1)
+                    int(data.get("borrow_qty") or 1),
+                    data.get("start_date") or data["return_date"],
+                    data.get("start_time") or "",
+                    data.get("asset_unit_id") or ""
                 )
             )
             if commit or owns_db:
@@ -318,7 +341,7 @@ async def save_borrow_request(data: dict, db: aiosqlite.Connection = None, commi
 
         try:
             with open("backup_requests.txt", "a", encoding="utf-8") as f:
-                f.write(f"ID: {data['id']} | User: {data['user_id']} | Borrow: {data['item']} | Qty: {data.get('borrow_qty', 1)} | Return: {data['return_date']}\n")
+                f.write(f"ID: {data['id']} | User: {data['user_id']} | Borrow: {data['item']} | Qty: {data.get('borrow_qty', 1)} | Start: {data.get('start_date', '')} | Return: {data['return_date']}\n")
         except Exception:
             pass
         return True
@@ -368,6 +391,78 @@ async def mark_request_returned(req_id: str):
     async with _db_lock:
         await db.execute("UPDATE requests SET status = 'مُرجَع' WHERE id = ?", (req_id,))
         await db.commit()
+
+async def mark_borrow_returned_with_inspection(req_id: str, inspection_note: str, admin_id: int = None, admin_username: str = None):
+    db = await get_db()
+    async with _db_lock:
+        await db.execute(
+            "UPDATE requests SET status = 'مُرجَع', inspection_note = ?, admin_id = ?, admin_username = ? WHERE id = ?",
+            (inspection_note, admin_id, admin_username, req_id)
+        )
+        await db.commit()
+
+async def get_occupied_units(item: str) -> set:
+    db = await get_db()
+    async with db.execute(
+        "SELECT asset_unit_id FROM requests "
+        "WHERE request_type = 'استعارة' AND status = 'مقبول' AND event_name = ? AND asset_unit_id IS NOT NULL AND asset_unit_id != ''",
+        (item,)
+    ) as cursor:
+        rows = await cursor.fetchall()
+        return {r[0] for r in rows if r[0]}
+
+async def assign_borrow_asset_unit(req_id: str, unit_id: str):
+    db = await get_db()
+    async with _db_lock:
+        await db.execute("UPDATE requests SET asset_unit_id = ? WHERE id = ?", (unit_id, req_id))
+        await db.commit()
+
+async def request_borrow_extension(req_id: str, new_date: str, new_time: str, reason: str):
+    db = await get_db()
+    async with _db_lock:
+        await db.execute(
+            "UPDATE requests SET extension_status = 'معلق', extension_date = ?, extension_time = ?, extension_reason = ? WHERE id = ?",
+            (new_date, new_time, reason, req_id)
+        )
+        await db.commit()
+
+async def resolve_borrow_extension(req_id: str, approved: bool, admin_id: int = None, admin_username: str = None):
+    db = await get_db()
+    async with _db_lock:
+        if approved:
+            async with db.execute("SELECT extension_date, extension_time FROM requests WHERE id = ?", (req_id,)) as c:
+                row = await c.fetchone()
+                ext_date = row[0] if row else None
+                ext_time = row[1] if row else ""
+            if ext_date:
+                t24 = time_to_24(ext_time) if ext_time else ""
+                await db.execute(
+                    """UPDATE requests 
+                       SET status = 'مقبول',
+                           date = ?,
+                           time = CASE WHEN ? != '' THEN ? ELSE time END,
+                           start_time_24 = CASE WHEN ? != '' THEN ? ELSE start_time_24 END,
+                           extension_status = 'مقبول',
+                           admin_id = ?,
+                           admin_username = ?
+                       WHERE id = ?""",
+                    (ext_date, ext_time, ext_time, t24, t24, admin_id, admin_username, req_id)
+                )
+        else:
+            await db.execute(
+                "UPDATE requests SET extension_status = 'مرفوض', admin_id = ?, admin_username = ? WHERE id = ?",
+                (admin_id, admin_username, req_id)
+            )
+        await db.commit()
+
+async def get_overdue_borrows(today_str: str, current_time_24: str = "23:59") -> list:
+    db = await get_db()
+    sql = """SELECT * FROM requests 
+             WHERE request_type = 'استعارة' AND status = 'مقبول' 
+               AND (date < ? OR (date = ? AND start_time_24 IS NOT NULL AND start_time_24 != '' AND start_time_24 < ?))
+             ORDER BY date ASC, time ASC"""
+    async with db.execute(sql, (today_str, today_str, current_time_24)) as cursor:
+        return await cursor.fetchall()
 
 async def get_user_requests_page(user_id: int, status: str = None, limit: int = 5, offset: int = 0):
     sql = "SELECT * FROM requests WHERE user_id = ?"
@@ -689,7 +784,8 @@ async def update_request_field(req_id: str, field: str, value: str):
     allowed_fields = {
         "department", "event_name", "event_type", "objective", "date",
         "time", "end_time", "location", "coverage_type", "importance",
-        "external_media", "notes", "contact_name", "phone", "telegram"
+        "external_media", "notes", "contact_name", "phone", "telegram",
+        "start_date", "start_time", "asset_unit_id", "inspection_note"
     }
     if field not in allowed_fields:
         raise ValueError(f"Invalid field name: {field}")

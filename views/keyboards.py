@@ -58,10 +58,12 @@ def confirmation_edit_keyboard():
     ]
     return InlineKeyboardMarkup(keyboard)
 
-def user_request_action_keyboard(req_id, status, role="مستخدم عادي", back_data: str = None, allow_edit: bool = True):
+def user_request_action_keyboard(req_id, status, role="مستخدم عادي", back_data: str = None, allow_edit: bool = True, is_borrow: bool = False, can_extend: bool = False):
     keyboard = []
     if status == 'معلق' and allow_edit:
         keyboard.append([InlineKeyboardButton("✏️ تعديل الطلب", callback_data=f"user_edit_{req_id}")])
+    if is_borrow and can_extend:
+        keyboard.append([InlineKeyboardButton("⏱️ طلب تمديد الاستعارة", callback_data=f"user_extend_{req_id}")])
     keyboard.append([InlineKeyboardButton("🗑️ حذف الطلب", callback_data=f"user_delete_{req_id}")])
     if back_data:
         keyboard.append([InlineKeyboardButton("🔙 رجوع للقائمة", callback_data=back_data)])
@@ -235,11 +237,18 @@ def borrow_confirmation_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("✏️ الغرض", callback_data="bedit_item"), InlineKeyboardButton("✏️ اسم المستعير", callback_data="bedit_borrower")],
         [InlineKeyboardButton("✏️ العدد", callback_data="bedit_quantity"), InlineKeyboardButton("✏️ السبب", callback_data="bedit_reason")],
         [InlineKeyboardButton("✏️ رقم التواصل", callback_data="bedit_phone")],
-        [InlineKeyboardButton("✏️ تاريخ الإرجاع", callback_data="bedit_return_date"), InlineKeyboardButton("✏️ وقت الإرجاع", callback_data="bedit_return_time")],
+        [InlineKeyboardButton("✏️ موعد الاستلام", callback_data="bedit_start_date"), InlineKeyboardButton("✏️ موعد الإرجاع", callback_data="bedit_return_date")],
         [InlineKeyboardButton("✅ تأكيد وإرسال", callback_data="bconfirm_request")],
         [InlineKeyboardButton("❌ إلغاء الطلب", callback_data="bcancel_request")]
     ]
     return InlineKeyboardMarkup(keyboard)
+
+def borrow_pickup_choice_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📅 الاستلام اليوم", callback_data="bpick_today")],
+        [InlineKeyboardButton("🗓️ تحديد موعد استلام آخر", callback_data="bpick_custom")],
+        [InlineKeyboardButton("◀️ رجوع", callback_data="bpick_back"), InlineKeyboardButton("❌ إلغاء", callback_data="bpick_cancel")]
+    ])
 
 def borrow_quantity_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
@@ -254,4 +263,45 @@ def borrow_responsibility_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("❌ لا", callback_data="bresp_no")],
         [InlineKeyboardButton("🔙 رجوع للملخص", callback_data="bresp_back")],
     ])
+
+def user_extension_options_keyboard(req_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("+1 يوم 📅", callback_data=f"uext_quick_{req_id}_1"), InlineKeyboardButton("+2 يوم 📅", callback_data=f"uext_quick_{req_id}_2")],
+        [InlineKeyboardButton("+3 أيام 📅", callback_data=f"uext_quick_{req_id}_3"), InlineKeyboardButton("+أسبوع (7 أيام) 📅", callback_data=f"uext_quick_{req_id}_7")],
+        [InlineKeyboardButton("🔙 إلغاء والرجوع", callback_data=f"user_req_back_{req_id}")]
+    ])
+
+def admin_return_inspection_keyboard(req_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ سليم وكامل مع الملحقات", callback_data=f"bdash_retok_{req_id}")],
+        [InlineKeyboardButton("⚠️ به ملاحظة / نقص بالملحقات", callback_data=f"bdash_retnote_{req_id}")],
+        [InlineKeyboardButton("🔙 إلغاء", callback_data="bdash_refresh")]
+    ])
+
+def admin_assign_unit_keyboard(req_id: str, total_stock: int, occupied_units: set) -> InlineKeyboardMarkup:
+    buttons = []
+    row = []
+    for i in range(1, total_stock + 1):
+        unit_label = f"قطعة #{i}"
+        is_occ = unit_label in occupied_units
+        icon = "🔴" if is_occ else "🟢"
+        suffix = " (مشغولة)" if is_occ else ""
+        row.append(InlineKeyboardButton(f"{icon} قطعة #{i}{suffix}", callback_data=f"admin_setunit_{req_id}_{i}"))
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    buttons.append([InlineKeyboardButton("⚡ تخصيص أول قطعة متاحة تلقائياً", callback_data=f"admin_setunit_{req_id}_auto")])
+    buttons.append([InlineKeyboardButton("❌ إلغاء", callback_data="bdash_refresh")])
+    return InlineKeyboardMarkup(buttons)
+
+def admin_extension_decision_keyboard(req_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ موافقة على التمديد", callback_data=f"admin_ext_app_{req_id}"),
+            InlineKeyboardButton("❌ رفض التمديد", callback_data=f"admin_ext_rej_{req_id}")
+        ]
+    ])
+
 

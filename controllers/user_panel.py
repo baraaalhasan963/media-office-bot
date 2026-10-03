@@ -128,6 +128,7 @@ async def handle_user_action(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 if not req:
                     await query.edit_message_text("❌ لم يتم العثور على الطلب المحدد.")
                     return State.MENU
+                req = dict(req)
 
                 status_label = "⏳ معلق"
                 if req['status'] == 'مقبول':
@@ -140,15 +141,32 @@ async def handle_user_action(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 role = await db_app.get_user_role(query.from_user.id)
                 back_data = f"user_list_{filter_key}_{page}"
                 is_borrow = req['request_type'] == 'استعارة'
+                can_extend = is_borrow and req['status'] == 'مقبول' and (req.get('extension_status') != 'معلق')
 
                 if is_borrow:
+                    start_d = req['start_date'] if 'start_date' in req.keys() and req['start_date'] else req['date']
+                    start_t = req['start_time'] if 'start_time' in req.keys() and req['start_time'] else ""
+                    start_str = format_date_ar(start_d) + (f" ({escape_html(start_t)})" if start_t else "")
+                    ret_str = format_date_ar(req['date']) + (f" ({escape_html(req['time'])})" if req['time'] else "")
+                    unit_str = f"• <b>القطعة المخصصة:</b> {escape_html(req['asset_unit_id'])}\n" if req.get('asset_unit_id') else ""
+                    insp_str = f"• <b>نتيجة الفحص عند الإرجاع:</b> {escape_html(req['inspection_note'])}\n" if req.get('inspection_note') else ""
+                    ext_status = req.get('extension_status')
+                    ext_str = ""
+                    if ext_status == 'معلق':
+                        ext_str = f"⏳ <b>طلب تمديد قيد المراجعة إلى:</b> {format_date_ar(req.get('extension_date', ''))}\n"
+                    elif ext_status == 'مقبول':
+                        ext_str = "✅ <b>تم تمديد هذا الطلب سابقاً.</b>\n"
+
                     msg = (
                         f"• <b>طلب رقم:</b> <code>{req['id']}</code>\n"
                         f"• <b>الغرض:</b> {escape_html(req['event_name'])}\n"
+                        f"{unit_str}"
                         f"• <b>العدد:</b> {escape_html(str(req['borrow_qty'] or 1))}\n"
                         f"• <b>اسم المستعير:</b> {escape_html(req['contact_name'] or '')}\n"
-                        f"• <b>تاريخ الإرجاع:</b> {format_date_ar(req['date'])}\n"
-                        f"• <b>وقت الإرجاع:</b> {escape_html(req['time'] or '')}\n"
+                        f"• <b>موعد الاستلام:</b> {start_str}\n"
+                        f"• <b>موعد الإرجاع:</b> {ret_str}\n"
+                        f"{insp_str}"
+                        f"{ext_str}"
                         f"• <b>تحمل المسؤولية:</b> نعم\n"
                         f"• <b>وضع الطلب:</b> {status_label}"
                     )
@@ -166,12 +184,78 @@ async def handle_user_action(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     )
                 await query.edit_message_text(
                     msg,
-                    reply_markup=kb.user_request_action_keyboard(req['id'], req['status'], role, back_data=back_data, allow_edit=not is_borrow),
+                    reply_markup=kb.user_request_action_keyboard(req['id'], req['status'], role, back_data=back_data, allow_edit=not is_borrow, is_borrow=is_borrow, can_extend=can_extend),
                     parse_mode="HTML"
                 )
             except Exception as e:
                 logger.error(f"Error viewing request detail: {e}")
                 await query.edit_message_text("❌ حدث خطأ أثناء عرض تفاصيل الطلب.")
+        return State.MENU
+
+    if data.startswith("user_extend_"):
+        req_id = data.replace("user_extend_", "")
+        req = await db_app.get_request_by_id(req_id)
+        if not req or req['status'] != 'مقبول':
+            await query.answer("⚠️ لا يمكن تمديد هذا الطلب حالياً.", show_alert=True)
+            return State.MENU
+        req = dict(req)
+        await query.edit_message_text(
+            f"⏱️ <b>طلب تمديد فترة الاستعارة</b>\n\n"
+            f"• <b>الغرض:</b> {escape_html(req['event_name'])}\n"
+            f"• <b>موعد الإرجاع الحالي:</b> {format_date_ar(req['date'])}\n\n"
+            "اختر المدة التي ترغب بتمديدها:",
+            reply_markup=kb.user_extension_options_keyboard(req_id),
+            parse_mode="HTML"
+        )
+        return State.MENU
+
+    if data.startswith("uext_quick_"):
+        parts = data.split("_")
+        req_id = parts[2]
+        days = int(parts[3])
+        req = await db_app.get_request_by_id(req_id)
+        if not req:
+            await query.answer("❌ لم يتم العثور على الطلب.", show_alert=True)
+            return State.MENU
+        req = dict(req)
+        try:
+            cur_dt = datetime.strptime(req['date'], "%Y-%m-%d")
+            new_dt = cur_dt + timedelta(days=days)
+            new_date_str = new_dt.strftime("%Y-%m-%d")
+            await db_app.request_borrow_extension(req_id, new_date_str, req['time'] or "", f"تمديد سريع (+{days} أيام)")
+
+            # Notify user
+            await query.edit_message_text(
+                f"✅ <b>تم إرسال طلب تمديد الاستعارة</b> بنجاح!\n\n"
+                f"• الغرض: <b>{escape_html(req['event_name'])}</b>\n"
+                f"• الموعد الجديد المقترح: <b>{format_date_ar(new_date_str)}</b>\n\n"
+                "سيتم إشعارك بقرار الإدارة فوراً.",
+                parse_mode="HTML"
+            )
+
+            # Alert admin group
+            import config
+            admin_msg = (
+                "⏱️ <b>طلب تمديد فترة استعارة عتاد</b>\n\n"
+                f"• <b>رقم الطلب:</b> <code>{req_id}</code>\n"
+                f"• <b>الغرض:</b> {escape_html(req['event_name'])}\n"
+                f"• <b>المستعير:</b> {escape_html(req['contact_name'] or '')} (@{escape_html(query.from_user.username or 'بدون')})\n"
+                f"• <b>موعد الإرجاع الحالي:</b> {format_date_ar(req['date'])}\n"
+                f"• <b>الموعد المطلوب الجديد:</b> <b>{format_date_ar(new_date_str)}</b> (+{days} يوم)\n"
+            )
+            admin_kwargs = {
+                "chat_id": config.ADMIN_CHAT_ID,
+                "text": admin_msg,
+                "reply_markup": kb.admin_extension_decision_keyboard(req_id),
+                "parse_mode": "HTML"
+            }
+            topic = config.BORROW_TOPIC_ID or config.ADMIN_TOPIC_ID
+            if topic is not None:
+                admin_kwargs["message_thread_id"] = topic
+            await context.bot.send_message(**admin_kwargs)
+        except Exception as e:
+            logger.error(f"Error submitting extension: {e}")
+            await query.answer("❌ حدث خطأ أثناء إرسال طلب التمديد.", show_alert=True)
         return State.MENU
 
     if data.startswith("user_delete_"):
@@ -198,15 +282,32 @@ async def handle_user_action(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
                 role = await db_app.get_user_role(query.from_user.id)
                 is_borrow = req['request_type'] == 'استعارة'
+                can_extend = is_borrow and req['status'] == 'مقبول' and (req.get('extension_status') != 'معلق')
 
                 if is_borrow:
+                    start_d = req['start_date'] if 'start_date' in req.keys() and req['start_date'] else req['date']
+                    start_t = req['start_time'] if 'start_time' in req.keys() and req['start_time'] else ""
+                    start_str = format_date_ar(start_d) + (f" ({escape_html(start_t)})" if start_t else "")
+                    ret_str = format_date_ar(req['date']) + (f" ({escape_html(req['time'])})" if req['time'] else "")
+                    unit_str = f"• <b>القطعة المخصصة:</b> {escape_html(req['asset_unit_id'])}\n" if req.get('asset_unit_id') else ""
+                    insp_str = f"• <b>نتيجة الفحص عند الإرجاع:</b> {escape_html(req['inspection_note'])}\n" if req.get('inspection_note') else ""
+                    ext_status = req.get('extension_status')
+                    ext_str = ""
+                    if ext_status == 'معلق':
+                        ext_str = f"⏳ <b>طلب تمديد قيد المراجعة إلى:</b> {format_date_ar(req.get('extension_date', ''))}\n"
+                    elif ext_status == 'مقبول':
+                        ext_str = "✅ <b>تم تمديد هذا الطلب سابقاً.</b>\n"
+
                     msg = (
                         f"• <b>طلب رقم:</b> <code>{req['id']}</code>\n"
                         f"• <b>الغرض:</b> {escape_html(req['event_name'])}\n"
+                        f"{unit_str}"
                         f"• <b>العدد:</b> {escape_html(str(req['borrow_qty'] or 1))}\n"
                         f"• <b>اسم المستعير:</b> {escape_html(req['contact_name'] or '')}\n"
-                        f"• <b>تاريخ الإرجاع:</b> {format_date_ar(req['date'])}\n"
-                        f"• <b>وقت الإرجاع:</b> {escape_html(req['time'] or '')}\n"
+                        f"• <b>موعد الاستلام:</b> {start_str}\n"
+                        f"• <b>موعد الإرجاع:</b> {ret_str}\n"
+                        f"{insp_str}"
+                        f"{ext_str}"
                         f"• <b>تحمل المسؤولية:</b> نعم\n"
                         f"• <b>وضع الطلب:</b> {status_label}"
                     )
@@ -224,7 +325,7 @@ async def handle_user_action(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     )
                 await query.edit_message_text(
                     msg,
-                    reply_markup=kb.user_request_action_keyboard(req['id'], req['status'], role, allow_edit=not is_borrow),
+                    reply_markup=kb.user_request_action_keyboard(req['id'], req['status'], role, allow_edit=not is_borrow, is_borrow=is_borrow, can_extend=can_extend),
                     parse_mode="HTML"
                 )
         except Exception as e:

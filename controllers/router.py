@@ -61,11 +61,15 @@ from controllers.borrow import (
     borrow_set_phone,
     borrow_set_quantity,
     borrow_set_reason,
+    borrow_set_start_date,
+    borrow_set_start_time,
     borrow_set_return_date,
     borrow_set_return_time,
     handle_borrow_confirmation,
     handle_borrow_date_callback,
     handle_borrow_responsibility,
+    handle_borrow_start_date_callback,
+    handle_borrow_start_time_callback,
     handle_borrow_time_callback,
 )
 from controllers.user_panel import handle_user_action
@@ -81,6 +85,7 @@ from controllers.admin import (
     health_command,
 )
 from controllers.jobs import (
+    check_overdue_borrows,
     check_pre_event_reminders,
     cleanup_cache,
     send_borrow_reminder,
@@ -286,6 +291,14 @@ async def setup_application():
             State.BORROW_BORROWER: [MessageHandler(filters.TEXT & ~filters.COMMAND, borrow_set_borrower)],
             State.BORROW_REASON:   [MessageHandler(filters.TEXT & ~filters.COMMAND, borrow_set_reason)],
             State.BORROW_PHONE:    [MessageHandler(filters.TEXT & ~filters.COMMAND, borrow_set_phone)],
+            State.BORROW_START_DATE: [
+                CallbackQueryHandler(handle_borrow_start_date_callback, pattern="^(bpick_|bstart_cal_)"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, borrow_set_start_date),
+            ],
+            State.BORROW_START_TIME: [
+                CallbackQueryHandler(handle_borrow_start_time_callback, pattern="^bstart_time_pick_"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, borrow_set_start_time),
+            ],
             State.BORROW_RETURN_DATE: [
                 CallbackQueryHandler(handle_borrow_date_callback, pattern="^bcal_"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, borrow_set_return_date),
@@ -331,6 +344,9 @@ async def setup_application():
 
         # Pre-event reminders (30 min prior, check every 60s)
         application.job_queue.run_repeating(check_pre_event_reminders, interval=60, first=5)
+
+        # Overdue borrow check (every 15 minutes)
+        application.job_queue.run_repeating(check_overdue_borrows, interval=timedelta(minutes=15), first=15)
 
         logger.info("✅ Reminders, Daily Dose, and Cache Cleanup scheduled.")
     else:

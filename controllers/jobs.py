@@ -141,16 +141,18 @@ async def send_borrow_reminder(context: ContextTypes.DEFAULT_TYPE):
         if overdue:
             msg += "🚨 <b>أغراض تأخر إرجاعها:</b>\n"
             for r in overdue:
+                unit_text = f" ({r['asset_unit_id']})" if 'asset_unit_id' in r.keys() and r['asset_unit_id'] else ""
                 msg += (
-                    f"   • {escape_html(r['event_name'])} (العدد {r['borrow_qty'] or 1})"
+                    f"   • {escape_html(r['event_name'])}{unit_text} (العدد {r['borrow_qty'] or 1})"
                     f" — كان يجب إرجاعه {format_date_ar(r['date'])}\n"
                 )
             msg += "\n"
         if today_due:
             msg += "📌 <b>أغراض يجب إرجاعها اليوم:</b>\n"
             for r in today_due:
+                unit_text = f" ({r['asset_unit_id']})" if 'asset_unit_id' in r.keys() and r['asset_unit_id'] else ""
                 msg += (
-                    f"   • {escape_html(r['event_name'])} (العدد {r['borrow_qty'] or 1})"
+                    f"   • {escape_html(r['event_name'])}{unit_text} (العدد {r['borrow_qty'] or 1})"
                     f" — {escape_html(r['time'] or '')}\n"
                 )
             msg += "\n"
@@ -275,4 +277,49 @@ async def test_borrow_reminder_command(update: Update, context: ContextTypes.DEF
     except Exception as e:
         logger.error(f"Error in test_borrow_reminder_command: {e}")
         await status_msg.edit_text(f"❌ حدث خطأ أثناء تشغيل تذكير الاستعارات:\n<code>{escape_html(str(e))}</code>", parse_mode="HTML")
+
+
+async def check_overdue_borrows(context: ContextTypes.DEFAULT_TYPE):
+    """فحص دوري لتنبيه المستعيرين الذين تجاوزوا موعد الإرجاع مع زر طلب تمديد."""
+    now = datetime.now(timezone(timedelta(hours=3)))
+    today_str = now.strftime("%Y-%m-%d")
+    current_time_24 = now.strftime("%H:%M")
+
+    try:
+        overdue_items = await db_app.get_overdue_borrows(today_str, current_time_24)
+        for row in overdue_items:
+            req_id = row['id']
+            alert_key = f"overdue_alert_{req_id}_{today_str}"
+            if context.bot_data.get(alert_key):
+                continue
+
+            user_id = row['user_id']
+            item = row['event_name']
+            unit_desc = f" ({row['asset_unit_id']})" if 'asset_unit_id' in row.keys() and row['asset_unit_id'] else ""
+            ret_str = format_date_ar(row['date']) + (f" الساعة {row['time']}" if row['time'] else "")
+
+            overdue_msg = (
+                "🚨 <b>تنبيه: لقد تجاوزت موعد إرجاع العتاد المستعار!</b>\n\n"
+                f"• <b>الغرض:</b> <b>{escape_html(item)}</b>{escape_html(unit_desc)}\n"
+                f"• <b>رقم الطلب:</b> <code>{req_id}</code>\n"
+                f"• <b>موعد الإرجاع المحدد:</b> {ret_str}\n\n"
+                "يرجى إعادة الغرض لمكتب الإعلام في أقرب وقت لإتاحته لباقي الزملاء، أو طلب تمديد بالضغط على الزر أدناه:"
+            )
+            from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+            kb_ext = InlineKeyboardMarkup([
+                [InlineKeyboardButton("⏱️ طلب تمديد الاستعارة", callback_data=f"user_extend_{req_id}")]
+            ])
+            try:
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text=overdue_msg,
+                    reply_markup=kb_ext,
+                    parse_mode="HTML"
+                )
+                context.bot_data[alert_key] = True
+            except Exception as e:
+                logger.debug(f"Could not send overdue notice to user {user_id}: {e}")
+    except Exception as e:
+        logger.error(f"Error in check_overdue_borrows: {e}")
+
 

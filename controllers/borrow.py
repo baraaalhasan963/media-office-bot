@@ -42,6 +42,11 @@ async def borrow_edit_back_cancel(update: Update, context: ContextTypes.DEFAULT_
 
 async def send_borrow_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = context.user_data
+    start_d = data.get('start_date') or data.get('return_date', '')
+    start_t = data.get('start_time', '')
+    start_disp = format_date_ar(start_d) + (f" ({escape_html(start_t)})" if start_t else "")
+    ret_disp = format_date_ar(data.get('return_date', '')) + (f" ({escape_html(data.get('return_time', ''))})" if data.get('return_time') else "")
+
     msg = (
         "📦 <b>ملخص طلب استعارة غرض</b>\n\n"
         f"• <b>الغرض:</b> {escape_html(data.get('item', ''))}\n"
@@ -49,8 +54,8 @@ async def send_borrow_summary(update: Update, context: ContextTypes.DEFAULT_TYPE
         f"• <b>اسم المستعير:</b> {escape_html(data.get('borrower_name', ''))}\n"
         f"• <b>السبب:</b> {escape_html(data.get('reason', ''))}\n"
         f"• <b>رقم التواصل:</b> {escape_html(data.get('phone', ''))}\n"
-        f"• <b>تاريخ الإرجاع:</b> {format_date_ar(data.get('return_date', ''))}\n"
-        f"• <b>وقت الإرجاع:</b> {escape_html(data.get('return_time', ''))}\n\n"
+        f"• <b>موعد الاستلام:</b> {start_disp}\n"
+        f"• <b>موعد الإرجاع:</b> {ret_disp}\n\n"
         "هل ترغب في التأكيد والإرسال؟"
     )
     if update.message:
@@ -279,9 +284,241 @@ async def borrow_set_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data.get("borrow_return_to_summary"):
         await send_borrow_summary(update, context)
         return State.BORROW_CONFIRMATION
-    now = datetime.now()
+
     await update.message.reply_text(
-        f"📅 <b>اختر تاريخ الإرجاع</b> من التقويم أدناه،\n"
+        "📅 <b>متى ترغب في استلام الغرض؟</b>\n\n"
+        "اختر الاستلام اليوم، أو حدد موعداً آخر من التقويم:",
+        reply_markup=kb.borrow_pickup_choice_keyboard(),
+        parse_mode="HTML"
+    )
+    return State.BORROW_START_DATE
+
+
+async def handle_borrow_start_date_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    now = datetime.now(timezone(timedelta(hours=3)))
+    today_str = now.strftime("%Y-%m-%d")
+
+    if data == "bpick_today":
+        context.user_data["start_date"] = today_str
+        if context.user_data.get("borrow_return_to_summary"):
+            await send_borrow_summary(update, context)
+            return State.BORROW_CONFIRMATION
+        await query.edit_message_text(
+            f"✅ <b>تاريخ الاستلام:</b> {format_date_ar(today_str)} (اليوم)\n\n"
+            "⏰ اختر <b>وقت الاستلام</b> التقريبي:",
+            reply_markup=kb.generate_time_picker_keyboard(prefix="bstart_time_pick_"),
+            parse_mode="HTML"
+        )
+        return State.BORROW_START_TIME
+
+    if data == "bpick_custom":
+        await query.edit_message_text(
+            "📅 <b>اختر تاريخ الاستلام</b> من التقويم أدناه:\n"
+            "أو اكتبه يدوياً بصيغة (يوم/شهر/سنة):",
+            reply_markup=kb.generate_calendar_keyboard(now.year, now.month, prefix="bstart_cal_"),
+            parse_mode="HTML"
+        )
+        return State.BORROW_START_DATE
+
+    if data == "bpick_back":
+        if context.user_data.get("borrow_return_to_summary"):
+            await send_borrow_summary(update, context)
+            return State.BORROW_CONFIRMATION
+        await query.edit_message_text(
+            "يرجى إدخال <b>رقم التواصل</b>:",
+            reply_markup=kb.get_reply_keyboard([], with_back=True),
+            parse_mode="HTML"
+        )
+        return State.BORROW_PHONE
+
+    if data == "bpick_cancel":
+        is_admin = await is_supervisor(update.effective_user.id)
+        await query.edit_message_text("تم إلغاء العملية.")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="القائمة الرئيسية:",
+            reply_markup=kb.main_menu_keyboard(is_admin)
+        )
+        return State.MENU
+
+    if data == "bstart_cal_ignore":
+        return State.BORROW_START_DATE
+
+    if data.startswith("bstart_cal_prev_") or data.startswith("bstart_cal_next_"):
+        ym = data.split("_", 3)[3]
+        year, month = int(ym[:4]), int(ym[5:])
+        await query.edit_message_reply_markup(
+            reply_markup=kb.generate_calendar_keyboard(year, month, prefix="bstart_cal_")
+        )
+        return State.BORROW_START_DATE
+
+    if data.startswith("bstart_cal_select_"):
+        date_str = data.replace("bstart_cal_select_", "")
+        if date_str < today_str:
+            await query.answer("⚠️ لا يمكن اختيار تاريخ استلام في الماضي!", show_alert=True)
+            return State.BORROW_START_DATE
+        context.user_data["start_date"] = date_str
+        display = format_date_ar(date_str)
+        if context.user_data.get("borrow_return_to_summary"):
+            await send_borrow_summary(update, context)
+            return State.BORROW_CONFIRMATION
+        await query.edit_message_text(
+            f"✅ <b>تم اختيار تاريخ الاستلام:</b> {display}\n\n"
+            "⏰ الآن اختر <b>وقت الاستلام</b> التقريبي:",
+            reply_markup=kb.generate_time_picker_keyboard(prefix="bstart_time_pick_"),
+            parse_mode="HTML"
+        )
+        return State.BORROW_START_TIME
+
+    if data == "bstart_cal_back":
+        await query.edit_message_text(
+            "📅 <b>متى ترغب في استلام الغرض؟</b>",
+            reply_markup=kb.borrow_pickup_choice_keyboard(),
+            parse_mode="HTML"
+        )
+        return State.BORROW_START_DATE
+
+    if data == "bstart_cal_cancel":
+        is_admin = await is_supervisor(update.effective_user.id)
+        await query.edit_message_text("تم إلغاء العملية.")
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="القائمة الرئيسية:",
+            reply_markup=kb.main_menu_keyboard(is_admin)
+        )
+        return State.MENU
+
+    return State.BORROW_START_DATE
+
+
+async def borrow_set_start_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    back = await borrow_edit_back_cancel(update, context)
+    if back is not None:
+        return back
+    text = update.message.text
+    if "إلغاء" in text:
+        return await borrow_cancel(update, context)
+    if "رجوع" in text:
+        await update.message.reply_text(
+            "يرجى إدخال <b>رقم التواصل</b>:",
+            reply_markup=kb.get_reply_keyboard([], with_back=True),
+            parse_mode="HTML"
+        )
+        return State.BORROW_PHONE
+
+    match = re.search(r"(\d{1,2})/(\d{1,2})/(\d{4})", text)
+    if match:
+        dd, mm, yyyy = match.groups()
+        date_str = f"{yyyy}-{int(mm):02d}-{int(dd):02d}"
+        now = datetime.now(timezone(timedelta(hours=3)))
+        today_str = now.strftime("%Y-%m-%d")
+        if date_str < today_str:
+            await update.message.reply_text(
+                "⚠️ لا يمكن اختيار تاريخ استلام في الماضي.\n"
+                "يرجى إدخال تاريخ اليوم أو تاريخ مستقبلي:",
+                parse_mode="HTML"
+            )
+            return State.BORROW_START_DATE
+        display = format_date_ar(date_str)
+    else:
+        date_str = text
+        display = text
+
+    context.user_data["start_date"] = date_str
+    if context.user_data.get("borrow_return_to_summary"):
+        await send_borrow_summary(update, context)
+        return State.BORROW_CONFIRMATION
+
+    await update.message.reply_text(
+        f"✅ <b>تم تسجيل تاريخ الاستلام:</b> {display}\n\n"
+        "⏰ الآن اختر <b>وقت الاستلام</b> التقريبي:",
+        reply_markup=kb.generate_time_picker_keyboard(prefix="bstart_time_pick_"),
+        parse_mode="HTML"
+    )
+    return State.BORROW_START_TIME
+
+
+async def handle_borrow_start_time_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    if data.startswith("bstart_time_pick_"):
+        time_val = data.replace("bstart_time_pick_", "")
+        if time_val == "custom":
+            await query.edit_message_text(
+                "✏️ يرجى إدخال <b>وقت الاستلام</b> يدوياً\n"
+                "مثال: <code>10:00 صباحاً</code> أو <code>14:30</code>",
+                parse_mode="HTML"
+            )
+            context.user_data["awaiting_borrow_custom_start_time"] = True
+            return State.BORROW_START_TIME
+        elif time_val == "back":
+            await query.edit_message_text(
+                "📅 <b>متى ترغب في استلام الغرض؟</b>",
+                reply_markup=kb.borrow_pickup_choice_keyboard(),
+                parse_mode="HTML"
+            )
+            return State.BORROW_START_DATE
+        elif time_val == "cancel":
+            return await borrow_cancel(update, context)
+
+        context.user_data["start_time"] = time_val
+        context.user_data.pop("awaiting_borrow_custom_start_time", None)
+
+        if context.user_data.get("borrow_return_to_summary"):
+            await send_borrow_summary(update, context)
+            return State.BORROW_CONFIRMATION
+
+        now = datetime.now()
+        start_d = context.user_data.get("start_date", "")
+        start_disp = format_date_ar(start_d) if start_d else "اليوم"
+
+        await query.edit_message_text(
+            f"✅ <b>موعد الاستلام:</b> {start_disp} الساعة {escape_html(time_val)}\n\n"
+            "📅 الآن <b>اختر تاريخ الإرجاع</b> من التقويم أدناه:\n"
+            "أو اكتب التاريخ يدوياً بصيغة (يوم/شهر/سنة):",
+            reply_markup=kb.generate_calendar_keyboard(now.year, now.month, prefix="bcal_"),
+            parse_mode="HTML"
+        )
+        return State.BORROW_RETURN_DATE
+
+    return State.BORROW_START_TIME
+
+
+async def borrow_set_start_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    back = await borrow_edit_back_cancel(update, context)
+    if back is not None:
+        return back
+    text = update.message.text
+    if "إلغاء" in text:
+        return await borrow_cancel(update, context)
+    if "رجوع" in text:
+        await update.message.reply_text(
+            "📅 <b>متى ترغب في استلام الغرض؟</b>",
+            reply_markup=kb.borrow_pickup_choice_keyboard(),
+            parse_mode="HTML"
+        )
+        return State.BORROW_START_DATE
+
+    context.user_data["start_time"] = text
+    context.user_data.pop("awaiting_borrow_custom_start_time", None)
+
+    if context.user_data.get("borrow_return_to_summary"):
+        await send_borrow_summary(update, context)
+        return State.BORROW_CONFIRMATION
+
+    now = datetime.now()
+    start_d = context.user_data.get("start_date", "")
+    start_disp = format_date_ar(start_d) if start_d else "اليوم"
+
+    await update.message.reply_text(
+        f"✅ <b>موعد الاستلام:</b> {start_disp} الساعة {escape_html(text)}\n\n"
+        "📅 الآن <b>اختر تاريخ الإرجاع</b> من التقويم أدناه:\n"
         "أو اكتب التاريخ يدوياً بصيغة (يوم/شهر/سنة):",
         reply_markup=kb.generate_calendar_keyboard(now.year, now.month, prefix="bcal_"),
         parse_mode="HTML"
@@ -329,9 +566,14 @@ async def handle_borrow_date_callback(update: Update, context: ContextTypes.DEFA
         date_str = data.replace("bcal_select_", "")
         now = datetime.now(timezone(timedelta(hours=3)))
         today_str = now.strftime("%Y-%m-%d")
+        start_date = context.user_data.get("start_date") or today_str
         if date_str < today_str:
             await query.answer("⚠️ لا يمكن اختيار تاريخ إرجاع في الماضي!", show_alert=True)
             return State.BORROW_RETURN_DATE
+        if date_str < start_date:
+            await query.answer(f"⚠️ تاريخ الإرجاع لا يمكن أن يكون قبل تاريخ الاستلام ({format_date_ar(start_date)})!", show_alert=True)
+            return State.BORROW_RETURN_DATE
+
         context.user_data["return_date"] = date_str
         display = format_date_ar(date_str)
         if await borrow_day_blocked(update, context, date_str):
@@ -362,11 +604,11 @@ async def handle_borrow_date_callback(update: Update, context: ContextTypes.DEFA
             await send_borrow_summary(update, context)
             return State.BORROW_CONFIRMATION
         await query.edit_message_text(
-            "يرجى إدخال <b>رقم التواصل</b>:",
-            reply_markup=kb.get_reply_keyboard([], with_back=True),
+            "⏰ اختر <b>وقت الاستلام</b>:",
+            reply_markup=kb.generate_time_picker_keyboard(prefix="bstart_time_pick_"),
             parse_mode="HTML"
         )
-        return State.BORROW_PHONE
+        return State.BORROW_START_TIME
 
     if data == "bcal_cancel":
         is_admin = await is_supervisor(update.effective_user.id)
@@ -390,11 +632,11 @@ async def borrow_set_return_date(update: Update, context: ContextTypes.DEFAULT_T
         return await borrow_cancel(update, context)
     if "رجوع" in text:
         await update.message.reply_text(
-            "يرجى إدخال <b>رقم التواصل</b>:",
-            reply_markup=kb.get_reply_keyboard([], with_back=True),
+            "⏰ اختر <b>وقت الاستلام</b>:",
+            reply_markup=kb.generate_time_picker_keyboard(prefix="bstart_time_pick_"),
             parse_mode="HTML"
         )
-        return State.BORROW_PHONE
+        return State.BORROW_START_TIME
 
     match = re.search(r"(\d{1,2})/(\d{1,2})/(\d{4})", text)
     if match:
@@ -402,10 +644,18 @@ async def borrow_set_return_date(update: Update, context: ContextTypes.DEFAULT_T
         date_str = f"{yyyy}-{int(mm):02d}-{int(dd):02d}"
         now = datetime.now(timezone(timedelta(hours=3)))
         today_str = now.strftime("%Y-%m-%d")
+        start_date = context.user_data.get("start_date") or today_str
         if date_str < today_str:
             await update.message.reply_text(
                 "⚠️ لا يمكن اختيار تاريخ إرجاع في الماضي.\n"
                 "يرجى إدخال تاريخ اليوم أو تاريخ مستقبلي:",
+                parse_mode="HTML"
+            )
+            return State.BORROW_RETURN_DATE
+        if date_str < start_date:
+            await update.message.reply_text(
+                f"⚠️ تاريخ الإرجاع لا يمكن أن يكون قبل تاريخ الاستلام (<b>{escape_html(format_date_ar(start_date))}</b>).\n"
+                "يرجى إدخال تاريخ إرجاع صالح:",
                 parse_mode="HTML"
             )
             return State.BORROW_RETURN_DATE
@@ -565,6 +815,13 @@ async def handle_borrow_confirmation(update: Update, context: ContextTypes.DEFAU
                 parse_mode="HTML"
             )
             return State.BORROW_PHONE
+        if field == "start_date":
+            await context.bot.send_message(
+                chat_id, "📅 <b>اختر موعد الاستلام:</b>",
+                reply_markup=kb.borrow_pickup_choice_keyboard(),
+                parse_mode="HTML"
+            )
+            return State.BORROW_START_DATE
         if field == "return_date":
             now = datetime.now()
             saved = context.user_data.get("return_date", "")
@@ -646,6 +903,8 @@ async def _submit_borrow_request(update: Update, context: ContextTypes.DEFAULT_T
             "reason": d.get("reason", ""),
             "borrower_name": d.get("borrower_name", ""),
             "phone": d.get("phone", ""),
+            "start_date": d.get("start_date") or d.get("return_date", ""),
+            "start_time": d.get("start_time", ""),
             "return_date": d.get("return_date", ""),
             "return_time": d.get("return_time", ""),
         }

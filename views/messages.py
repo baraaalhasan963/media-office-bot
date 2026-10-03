@@ -73,6 +73,7 @@ async def _build_request_details_message(req, role: str):
 
 async def _build_borrow_request_details(req, role: str):
     from views.formatting import format_whatsapp_url
+    req = dict(req)
     status_label = "⏳ معلق"
     if req['status'] == 'مقبول':
         status_label = "✅ مقبول (مُستعار)"
@@ -88,17 +89,47 @@ async def _build_borrow_request_details(req, role: str):
     if wa_url:
         phone_display += f" (<a href=\"{wa_url}\">مراسلة واتساب 💬</a>)"
 
+    start_date_val = req['start_date'] if 'start_date' in req.keys() and req['start_date'] else req['date']
+    start_time_val = req['start_time'] if 'start_time' in req.keys() and req['start_time'] else ""
+    unit_id_val = req['asset_unit_id'] if 'asset_unit_id' in req.keys() and req['asset_unit_id'] else ""
+    inspection_val = req['inspection_note'] if 'inspection_note' in req.keys() and req['inspection_note'] else ""
+    ext_status = req['extension_status'] if 'extension_status' in req.keys() and req['extension_status'] else ""
+
+    start_info = format_date_ar(start_date_val)
+    if start_time_val:
+        start_info += f" ({escape_html(start_time_val)})"
+
+    return_info = format_date_ar(req['date'])
+    if req['time']:
+        return_info += f" ({escape_html(req['time'])})"
+
+    unit_line = f"• <b>القطعة المخصصة:</b> {escape_html(unit_id_val)}\n" if unit_id_val else ""
+    inspection_line = f"• <b>نتيجة الفحص عند الإرجاع:</b> {escape_html(inspection_val)}\n" if inspection_val else ""
+
+    extension_line = ""
+    if ext_status == 'معلق':
+        ext_d = format_date_ar(req.get('extension_date') or '')
+        ext_r = req.get('extension_reason') or 'بدون سبب'
+        extension_line = f"⏳ <b>يوجد طلب تمديد معلق:</b> إلى {ext_d} (السبب: {escape_html(ext_r)})\n"
+    elif ext_status == 'مقبول':
+        extension_line = "✅ <b>تم تمديد فترة هذا الحجز سابقاً.</b>\n"
+    elif ext_status == 'مرفوض':
+        extension_line = "❌ <b>تم رفض طلب تمديد سابق.</b>\n"
+
     msg = (
         "📦 <b>تفاصيل طلب استعارة غرض</b>\n\n"
         f"• <b>رقم الطلب:</b> <code>{req['id']}</code>\n"
         f"{sender_line}\n"
         f"• <b>الغرض:</b> {escape_html(req['event_name'])}\n"
+        f"{unit_line}"
         f"• <b>العدد:</b> {escape_html(str(req['borrow_qty'] or 1))}\n"
         f"• <b>اسم المستعير:</b> {escape_html(req['contact_name'] or '')}\n"
         f"• <b>السبب:</b> {escape_html(req['objective'] or '')}\n"
         f"• <b>رقم التواصل:</b> {phone_display}\n"
-        f"• <b>تاريخ الإرجاع:</b> {format_date_ar(req['date'])}\n"
-        f"• <b>وقت الإرجاع:</b> {escape_html(req['time'] or '')}\n"
+        f"• <b>موعد الاستلام:</b> {start_info}\n"
+        f"• <b>موعد الإرجاع:</b> {return_info}\n"
+        f"{inspection_line}"
+        f"{extension_line}"
         f"• <b>تحمل المسؤولية:</b> نعم\n\n"
         f"• <b>حالة الطلب:</b> {status_label}\n"
     )

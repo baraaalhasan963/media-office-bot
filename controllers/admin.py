@@ -266,27 +266,39 @@ async def free_item(context, item: str):
     await _sync_borrow_board(context)
 
 
-async def _do_borrow_return(context, req_id: str, admin) -> bool:
+async def _do_borrow_return(context, req_id: str, admin, inspection_note: str = "سليم وكامل مع كافة الملحقات") -> bool:
     try:
         req_data = await db_app.get_request_by_id(req_id)
         if not req_data or req_data['request_type'] != 'استعارة' or req_data['status'] != 'مقبول':
             return False
         item = req_data['event_name']
         user_id = req_data['user_id']
+        unit_id = req_data['asset_unit_id'] if 'asset_unit_id' in req_data.keys() and req_data['asset_unit_id'] else ""
+        unit_text = f" ({unit_id})" if unit_id else ""
 
-        await db_app.mark_request_returned(req_id)
+        await db_app.mark_borrow_returned_with_inspection(
+            req_id,
+            inspection_note=inspection_note,
+            admin_id=admin.id,
+            admin_username=admin.username or str(admin.id)
+        )
         await db_app.log_audit_action(
             admin.id,
             admin.username or str(admin.id),
-            "إرجاع",
+            "إرجاع عتاد",
             req_id,
-            f"إرجاع غرض: {item}"
+            f"إرجاع {item}{unit_text} — فحص: {inspection_note}"
         )
 
         try:
+            status_icon = "✅" if "سليم" in inspection_note else "⚠️"
             await context.bot.send_message(
                 chat_id=user_id,
-                text=f"♻️ تم استلام الغرض <b>{escape_html(item)}</b> وتأكيد إرجاعه. شكراً لك!",
+                text=(
+                    f"♻️ <b>تم استلام وتأكيد إرجاع الغرض:</b> <b>{escape_html(item)}</b>{escape_html(unit_text)}\n\n"
+                    f"🔍 <b>نتيجة الفحص:</b> {status_icon} {escape_html(inspection_note)}\n\n"
+                    "شكراً لتعاونكم مع مكتب الإعلام!"
+                ),
                 parse_mode="HTML"
             )
         except Exception as e:
@@ -299,9 +311,50 @@ async def _do_borrow_return(context, req_id: str, admin) -> bool:
         return False
 
 
+async def _complete_admin_borrow_approval(context, req_id: str, admin, unit_id: str = ""):
+    row = await db_app.get_request_by_id(req_id)
+    if not row:
+        return
+    item = row['event_name']
+    requester_id = row['user_id']
+    if unit_id:
+        await db_app.assign_borrow_asset_unit(req_id, unit_id)
+
+    await db_app.update_request_status(req_id, "مقبول", admin_id=admin.id, admin_username=admin.username or str(admin.id))
+    unit_desc = f" ({unit_id})" if unit_id else ""
+    await db_app.log_audit_action(
+        admin.id,
+        admin.username or str(admin.id),
+        "قبول استعارة",
+        req_id,
+        f"قبول طلب استعارة {item}{unit_desc}"
+    )
+
+    if requester_id:
+        start_d = row['start_date'] if 'start_date' in row.keys() and row['start_date'] else row['date']
+        start_t = row['start_time'] if 'start_time' in row.keys() and row['start_time'] else ""
+        start_info = format_date_ar(start_d) + (f" ({start_t})" if start_t else "")
+        unit_line = f"• <b>القطعة المسلّمة:</b> {escape_html(unit_id)}\n" if unit_id else ""
+
+        user_msg = (
+            f"✅ <b>تم قبول طلب استعارة الغرض!</b>\n\n"
+            f"• <b>رقم الطلب:</b> <code>{req_id}</code>\n"
+            f"• <b>الغرض:</b> <b>{escape_html(item)}</b>\n"
+            f"{unit_line}"
+            f"• <b>موعد الاستلام:</b> {start_info}\n"
+            f"• <b>موعد الإرجاع:</b> {format_date_ar(row['date'])}\n\n"
+            "يرجى مراجعة مكتب الإعلام لاستلام العتاد، والحرص على إرجاعه في الموعد المحدد."
+        )
+        try:
+            await context.bot.send_message(chat_id=requester_id, text=user_msg, parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"Error notifying borrower approval: {e}")
+
+
 async def _build_borrow_dashboard():
     now = datetime.now(timezone(timedelta(hours=3)))
     today_str = now.strftime("%Y-%m-%d")
+    current_time_str = now.strftime("%H:%M")
     timestamp = now.strftime("%H:%M")
 
     all_borrows = await db_app.get_all_borrow_requests()
@@ -317,26 +370,30 @@ async def _build_borrow_dashboard():
             return 0
     pending.sort(key=_req_key)
 
-    msg = "📦 <b>لوحة الاستعارات</b>\n\n"
+    msg = "📦 <b>لوحة الاستعارات المباشرة</b>\n\n"
 
     if pending:
-        msg += f"📋 <b>طلبات معلقة ({len(pending)}):</b>\n"
+        msg += f"📋 <b>طلبات معلقة تنتظر القرار ({len(pending)}):</b>\n"
         for r in pending:
+            start_d = r['start_date'] if 'start_date' in r.keys() and r['start_date'] else r['date']
             msg += (
                 f"🕐 <code>{escape_html(r['id'])}</code> — {escape_html(r['event_name'])} ×{r['borrow_qty'] or 1}"
-                f" — {escape_html(r['contact_name'] or '')} — حتى {format_date_ar(r['date'])}\n"
+                f" — {escape_html(r['contact_name'] or '')} (من {format_date_ar(start_d)} إلى {format_date_ar(r['date'])})\n"
             )
         msg += "\n"
     else:
         msg += "📋 لا توجد طلبات معلقة.\n"
 
     if approved:
-        msg += f"🔄 <b>أغراض مستعارة ({len(approved)}):</b>\n"
+        msg += f"🔄 <b>أغراض مستعارة حالياً ({len(approved)}):</b>\n"
         for r in approved:
-            overdue = " 🚨" if r['date'] < today_str else ""
+            unit_badge = f" ({r['asset_unit_id']})" if 'asset_unit_id' in r.keys() and r['asset_unit_id'] else ""
+            is_overdue = r['date'] < today_str or (r['date'] == today_str and r.get('start_time_24') and r['start_time_24'] < current_time_str)
+            overdue_flag = " 🚨 <b>(متأخر!)</b>" if is_overdue else ""
+            ext_flag = " ⏳ <b>(طلب تمديد)</b>" if 'extension_status' in r.keys() and r['extension_status'] == 'معلق' else ""
             msg += (
-                f"🔄 {escape_html(r['event_name'])} ×{r['borrow_qty'] or 1}"
-                f" — {escape_html(r['contact_name'] or '')} — حتى {format_date_ar(r['date'])}{overdue}\n"
+                f"🔄 {escape_html(r['event_name'])}{unit_badge} ×{r['borrow_qty'] or 1}"
+                f" — {escape_html(r['contact_name'] or '')} — حتى {format_date_ar(r['date'])}{overdue_flag}{ext_flag}\n"
             )
         msg += "\n"
     else:
@@ -361,8 +418,9 @@ async def _build_borrow_dashboard():
             InlineKeyboardButton(f"❌ رفض {r['id']}", callback_data=f"admin_reject_{r['id']}")
         ])
     for r in approved:
-        label = f"↩️ إرجاع {r['event_name']}"
-        if (r['borrow_qty'] or 1) > 1:
+        unit_text = f" ({r['asset_unit_id']})" if 'asset_unit_id' in r.keys() and r['asset_unit_id'] else ""
+        label = f"↩️ فحص واسترجاع {r['event_name']}{unit_text}"
+        if (r['borrow_qty'] or 1) > 1 and not unit_text:
             label += f" ×{r['borrow_qty'] or 1}"
         keyboard.append([
             InlineKeyboardButton(label, callback_data=f"bdash_return_{r['id']}")
@@ -452,12 +510,49 @@ async def handle_borrow_dashboard(update: Update, context: ContextTypes.DEFAULT_
 
     if data.startswith("bdash_return_"):
         req_id = data.replace("bdash_return_", "")
-        ok = await _do_borrow_return(context, req_id, update.effective_user)
+        req_data = await db_app.get_request_by_id(req_id)
+        if not req_data:
+            await query.answer("❌ لم يتم العثور على الطلب.", show_alert=True)
+            return
+        item_name = req_data['event_name']
+        unit_id = req_data['asset_unit_id'] if 'asset_unit_id' in req_data.keys() and req_data['asset_unit_id'] else ""
+        unit_desc = f" ({unit_id})" if unit_id else ""
+        await query.edit_message_text(
+            f"🔍 <b>فحص وتفقد العتاد عند الاسترجاع</b>\n\n"
+            f"• <b>الغرض:</b> {escape_html(item_name)}{escape_html(unit_desc)}\n"
+            f"• <b>رقم الطلب:</b> <code>{req_id}</code>\n"
+            f"• <b>المستعير:</b> {escape_html(req_data['contact_name'] or '')}\n\n"
+            "يرجى تفقد العتاد وتحديد نتيجة الفحص:",
+            reply_markup=kb.admin_return_inspection_keyboard(req_id),
+            parse_mode="HTML"
+        )
+        return
+
+    if data.startswith("bdash_retok_"):
+        req_id = data.replace("bdash_retok_", "")
+        ok = await _do_borrow_return(context, req_id, update.effective_user, inspection_note="سليم وكامل مع كافة الملحقات")
         if not ok:
-            await query.answer("⚠️ تعذّر تسجيل الإرجاع (الطلب غير صالح).", show_alert=True)
+            await query.answer("⚠️ تعذّر تسجيل الإرجاع.", show_alert=True)
         else:
-            await query.answer("✅ تم تسجيل الإرجاع")
+            await query.answer("✅ تم تسجيل الإرجاع وتأكيد سلامة العتاد")
         await _sync_borrow_board(context)
+        return
+
+    if data.startswith("bdash_retnote_"):
+        req_id = data.replace("bdash_retnote_", "")
+        kwargs = {
+            "chat_id": query.message.chat_id,
+            "text": f"⚠️ <b>تسجيل ملاحظة فحص واستلام للطلب <code>{req_id}</code></b>\n\n"
+                    "يرجى الرد على هذه الرسالة بملاحظة الفحص (نقص ملحقات، ضرر، أو ملاحظة):\n"
+                    "(ستُسجل الملاحظة في السجل وتُرسل للمستعير)",
+            "reply_markup": ForceReply(selective=True),
+            "parse_mode": "HTML"
+        }
+        if query.message.message_thread_id:
+            kwargs["message_thread_id"] = query.message.message_thread_id
+        await context.bot.send_message(**kwargs)
+        await query.answer()
+        return
 
 
 # ─── Main Admin Dashboard ─────────────────────────────────────────────────────
@@ -803,18 +898,18 @@ async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
                 await query.answer("⚠️ هذا الغرض غير مستعار حالياً.", show_alert=True)
                 return
 
-            item = req_data['event_name']
-            ok = await _do_borrow_return(context, req_id, update.effective_user)
-            await query.answer("✅ تم تسجيل الإرجاع" if ok else "⚠️ تعذّر تسجيل الإرجاع")
-            if not ok:
-                return
-            try:
-                await query.edit_message_text(
-                    f"✅ تم تسجيل إرجاع الغرض <b>{escape_html(item)}</b> (طلب <code>{req_id}</code>).",
-                    parse_mode="HTML"
-                )
-            except Exception:
-                pass
+            item_name = req_data['event_name']
+            unit_id = req_data['asset_unit_id'] if 'asset_unit_id' in req_data.keys() and req_data['asset_unit_id'] else ""
+            unit_desc = f" ({unit_id})" if unit_id else ""
+            await query.edit_message_text(
+                f"🔍 <b>فحص وتفقد العتاد عند الاسترجاع</b>\n\n"
+                f"• <b>الغرض:</b> {escape_html(item_name)}{escape_html(unit_desc)}\n"
+                f"• <b>رقم الطلب:</b> <code>{req_id}</code>\n"
+                f"• <b>المستعير:</b> {escape_html(req_data['contact_name'] or '')}\n\n"
+                "يرجى تفقد العتاد وتحديد نتيجة الفحص:",
+                reply_markup=kb.admin_return_inspection_keyboard(req_id),
+                parse_mode="HTML"
+            )
         except Exception as e:
             logger.error(f"Error in admin return: {e}")
             await query.edit_message_text("❌ حدث خطأ أثناء معالجة الإرجاع.")
@@ -876,8 +971,6 @@ async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
         req_id = data.replace("admin_approve_", "")
         status = "مقبول"
         admin = update.effective_user
-        requester_id = None
-        event_name = ""
 
         try:
             row = await db_app.get_request_by_id(req_id)
@@ -911,46 +1004,152 @@ async def handle_admin_action(update: Update, context: ContextTypes.DEFAULT_TYPE
             event_name = row['event_name']
             request_type = row['request_type'] or 'تغطية'
 
-            await db_app.update_request_status(req_id, status, admin_id=admin.id, admin_username=admin.username)
-            action_desc = f"قبول طلب استعارة غرض: {event_name}" if request_type == 'استعارة' else f"قبول طلب تغطية حدث: {event_name}"
-            await db_app.log_audit_action(
-                admin.id,
-                admin.username or str(admin.id),
-                "قبول",
-                req_id,
-                action_desc
-            )
-
+            # إذا كان طلب استعارة لغرض فيه نسخ متعددة ولم تُحدد القطعة بعد
             if request_type == 'استعارة':
+                stock_map = await db_app.get_borrow_item_stock()
+                stock = stock_map.get(event_name, BORROW_ITEM_STOCK.get(event_name, 1))
+                if stock > 1 and not (row.get('asset_unit_id')):
+                    occupied = await db_app.get_occupied_units(event_name)
+                    await query.edit_message_text(
+                        f"📦 <b>تخصيص رقم القطعة للغرض المستعار</b>\n\n"
+                        f"• <b>الغرض:</b> {escape_html(event_name)} (يتوفر منه {stock} قطع)\n"
+                        f"• <b>الطلب:</b> <code>{req_id}</code> للمستعير: {escape_html(row['contact_name'] or '')}\n\n"
+                        "اختر رقم القطعة المسلّمة للمستعير:",
+                        reply_markup=kb.admin_assign_unit_keyboard(req_id, stock, occupied),
+                        parse_mode="HTML"
+                    )
+                    return
+
+                # عتاد بنسخة واحدة أو محدد مسبقاً
+                assigned_unit = row.get('asset_unit_id') or "قطعة #1"
+                await _complete_admin_borrow_approval(context, req_id, admin, unit_id=assigned_unit)
                 try:
                     await query.message.delete()
                 except Exception as e:
                     logger.error(f"Error deleting borrow details after approve: {e}")
                 await _sync_borrow_board(context, notify=True)
-            else:
-                icon = "✅"
-                original_text = query.message.text or ""
-                new_text = original_text + f"\n\n{icon} تم <b>القبول</b> بواسطة: @{admin.username or admin.first_name}"
-                await query.edit_message_text(new_text, parse_mode="HTML")
+                return
+
+            # طلبات التغطية العادية
+            await db_app.update_request_status(req_id, status, admin_id=admin.id, admin_username=admin.username)
+            await db_app.log_audit_action(
+                admin.id,
+                admin.username or str(admin.id),
+                "قبول",
+                req_id,
+                f"قبول طلب تغطية حدث: {event_name}"
+            )
+            icon = "✅"
+            original_text = query.message.text or ""
+            new_text = original_text + f"\n\n{icon} تم <b>القبول</b> بواسطة: @{admin.username or admin.first_name}"
+            await query.edit_message_text(new_text, parse_mode="HTML")
 
             if requester_id:
-                if request_type == 'استعارة':
-                    user_msg = (
-                        f"✅ <b>تحديث بخصوص طلبك رقم <code>{req_id}</code></b>\n\n"
-                        f"تم <b>قبول</b> طلب استعارة الغرض (<b>{escape_html(event_name)}</b>).\n\n"
-                        "يمكنك مراجعة مكتب الإعلام لاستلامه ومراعاة تاريخ الإرجاع."
-                    )
-                else:
-                    user_msg = (
-                        f"✅ <b>تحديث بخصوص طلبك رقم <code>{req_id}</code></b>\n\n"
-                        f"تم <b>قبول</b> طلب التغطية لحدث (<b>{escape_html(event_name)}</b>).\n\n"
-                        "شكراً لتعاونكم."
-                    )
+                user_msg = (
+                    f"✅ <b>تحديث بخصوص طلبك رقم <code>{req_id}</code></b>\n\n"
+                    f"تم <b>قبول</b> طلب التغطية لحدث (<b>{escape_html(event_name)}</b>).\n\n"
+                    "شكراً لتعاونكم."
+                )
                 await context.bot.send_message(chat_id=requester_id, text=user_msg, parse_mode="HTML")
 
         except Exception as e:
             logger.error(f"Error in admin action: {e}")
             await query.edit_message_text("❌ حدث خطأ أثناء معالجة الطلب.")
+        return
+
+    if data.startswith("admin_setunit_"):
+        parts = data.split("_")
+        req_id = parts[2]
+        unit_choice = parts[3]
+        row = await db_app.get_request_by_id(req_id)
+        if not row:
+            await query.answer("❌ لم يتم العثور على الطلب.", show_alert=True)
+            return
+
+        item = row['event_name']
+        stock_map = await db_app.get_borrow_item_stock()
+        stock = stock_map.get(item, BORROW_ITEM_STOCK.get(item, 1))
+        occupied = await db_app.get_occupied_units(item)
+
+        if unit_choice == "auto":
+            assigned_unit = None
+            for i in range(1, stock + 1):
+                cand = f"قطعة #{i}"
+                if cand not in occupied:
+                    assigned_unit = cand
+                    break
+            if not assigned_unit:
+                assigned_unit = "قطعة #1"
+        else:
+            assigned_unit = f"قطعة #{unit_choice}"
+
+        await _complete_admin_borrow_approval(context, req_id, update.effective_user, unit_id=assigned_unit)
+        await query.answer(f"✅ تم تخصيص {assigned_unit} وقبول الطلب")
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        await _sync_borrow_board(context, notify=True)
+        return
+
+    if data.startswith("admin_ext_app_"):
+        req_id = data.replace("admin_ext_app_", "")
+        admin = update.effective_user
+        await db_app.resolve_borrow_extension(req_id, approved=True, admin_id=admin.id, admin_username=admin.username or str(admin.id))
+        fresh = await db_app.get_request_by_id(req_id)
+        if fresh:
+            await db_app.log_audit_action(
+                admin.id, admin.username or str(admin.id),
+                "قبول تمديد", req_id,
+                f"قبول تمديد استعارة {fresh['event_name']} حتى {fresh['date']}"
+            )
+            try:
+                await context.bot.send_message(
+                    chat_id=fresh['user_id'],
+                    text=(
+                        f"🎉 <b>تمت الموافقة على طلب تمديد الاستعارة!</b>\n\n"
+                        f"• <b>الغرض:</b> {escape_html(fresh['event_name'])}\n"
+                        f"• <b>موعد الإرجاع الجديد المعتمد:</b> <b>{format_date_ar(fresh['date'])}</b> الساعة {escape_html(fresh['time'] or '')}\n\n"
+                        "شكراً لالتزامك بالتواصل المسبق!"
+                    ),
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                logger.error(f"Error notifying extension approval: {e}")
+        await query.edit_message_text(
+            f"✅ <b>تم قبول طلب التمديد</b> للطلب <code>{req_id}</code> بواسطة @{admin.username or admin.id}.",
+            parse_mode="HTML"
+        )
+        await _sync_borrow_board(context)
+        return
+
+    if data.startswith("admin_ext_rej_"):
+        req_id = data.replace("admin_ext_rej_", "")
+        admin = update.effective_user
+        await db_app.resolve_borrow_extension(req_id, approved=False, admin_id=admin.id, admin_username=admin.username or str(admin.id))
+        fresh = await db_app.get_request_by_id(req_id)
+        if fresh:
+            await db_app.log_audit_action(
+                admin.id, admin.username or str(admin.id),
+                "رفض تمديد", req_id,
+                f"رفض تمديد استعارة {fresh['event_name']}"
+            )
+            try:
+                await context.bot.send_message(
+                    chat_id=fresh['user_id'],
+                    text=(
+                        f"❌ <b>تم رفض طلب تمديد الاستعارة</b> للغرض <b>{escape_html(fresh['event_name'])}</b>.\n\n"
+                        f"يرجى الالتزام بموعد الإرجاع المحدد: <b>{format_date_ar(fresh['date'])}</b>."
+                    ),
+                    parse_mode="HTML"
+                )
+            except Exception as e:
+                logger.error(f"Error notifying extension rejection: {e}")
+        await query.edit_message_text(
+            f"❌ <b>تم رفض طلب التمديد</b> للطلب <code>{req_id}</code> بواسطة @{admin.username or admin.id}.",
+            parse_mode="HTML"
+        )
+        return
 
     if data == "admin_audit_logs":
         user_id = query.from_user.id
@@ -1018,6 +1217,36 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     replied_msg = update.message.reply_to_message
     orig_text = replied_msg.text or ""
+
+    # تسجيل ملاحظة فحص واستلام للطلب
+    if "تسجيل ملاحظة فحص واستلام للطلب" in orig_text:
+        match = re.search(r"للطلب <code>([\w\-]+)</code>", orig_text)
+        if not match:
+            match = re.search(r"للطلب ([\w\-]+)", orig_text)
+        if not match:
+            await update.message.reply_text("❌ تعذّر استخراج معرف الطلب.")
+            return
+
+        req_id = match.group(1)
+        note = (update.message.text or "").strip()
+        if not note:
+            await update.message.reply_text("❌ يرجى كتابة ملاحظة الفحص.")
+            return
+
+        ok = await _do_borrow_return(context, req_id, update.effective_user, inspection_note=note)
+        if ok:
+            await update.message.reply_text(
+                f"✅ تم تسجيل إرجاع العتاد للطلب <code>{req_id}</code> مع ملاحظة الفحص:\n<i>{escape_html(note)}</i>",
+                parse_mode="HTML"
+            )
+            try:
+                await update.message.reply_to_message.delete()
+            except Exception:
+                pass
+            await _sync_borrow_board(context, notify=True)
+        else:
+            await update.message.reply_text("⚠️ تعذر تسجيل الإرجاع (قد يكون مُرجعاً بالفعل).")
+        return
 
     # رفض طلب استعارة
     if "📦 لرفض طلب استعارة" in orig_text:
