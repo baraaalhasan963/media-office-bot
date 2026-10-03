@@ -63,11 +63,16 @@ async def _build_request_details_message(req, role: str):
                 InlineKeyboardButton("❌ رفض", callback_data=f"admin_reject_{req['id']}")
             ])
         keyboard.append([InlineKeyboardButton("🗑️ حذف", callback_data=f"admin_delete_{req['id']}")])
+        
+        # Smart direct contact button
+        if req.get('user_id'):
+            keyboard.append([InlineKeyboardButton("👤 فتح حساب مقدم الطلب", url=f"tg://user?id={req['user_id']}")])
 
     return msg, keyboard
 
 
 async def _build_borrow_request_details(req, role: str):
+    from views.formatting import format_whatsapp_url
     status_label = "⏳ معلق"
     if req['status'] == 'مقبول':
         status_label = "✅ مقبول (مُستعار)"
@@ -77,6 +82,11 @@ async def _build_borrow_request_details(req, role: str):
         status_label = "↩️ مُرجَع"
 
     sender_line = await _get_sender_line(req)
+    phone = req['phone'] or ''
+    wa_url = format_whatsapp_url(phone) if phone else None
+    phone_display = f"<code>{escape_html(phone)}</code>"
+    if wa_url:
+        phone_display += f" (<a href=\"{wa_url}\">مراسلة واتساب 💬</a>)"
 
     msg = (
         "📦 <b>تفاصيل طلب استعارة غرض</b>\n\n"
@@ -86,7 +96,7 @@ async def _build_borrow_request_details(req, role: str):
         f"• <b>العدد:</b> {escape_html(str(req['borrow_qty'] or 1))}\n"
         f"• <b>اسم المستعير:</b> {escape_html(req['contact_name'] or '')}\n"
         f"• <b>السبب:</b> {escape_html(req['objective'] or '')}\n"
-        f"• <b>رقم التواصل:</b> {escape_html(req['phone'] or '')}\n"
+        f"• <b>رقم التواصل:</b> {phone_display}\n"
         f"• <b>تاريخ الإرجاع:</b> {format_date_ar(req['date'])}\n"
         f"• <b>وقت الإرجاع:</b> {escape_html(req['time'] or '')}\n"
         f"• <b>تحمل المسؤولية:</b> نعم\n\n"
@@ -105,6 +115,15 @@ async def _build_borrow_request_details(req, role: str):
         elif req['status'] == 'مقبول':
             keyboard.append([InlineKeyboardButton("↩️ تسجيل الإرجاع", callback_data=f"admin_return_{req['id']}")])
         keyboard.append([InlineKeyboardButton("🗑️ حذف", callback_data=f"admin_delete_{req['id']}")])
+
+        # Smart contact buttons
+        contact_buttons = []
+        if wa_url:
+            contact_buttons.append(InlineKeyboardButton("💬 مراسلة واتساب", url=wa_url))
+        if req.get('user_id'):
+            contact_buttons.append(InlineKeyboardButton("👤 حساب التلغرام", url=f"tg://user?id={req['user_id']}"))
+        if contact_buttons:
+            keyboard.append(contact_buttons)
 
     return msg, keyboard
 

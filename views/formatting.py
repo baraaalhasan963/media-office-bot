@@ -180,3 +180,58 @@ def build_time_conflicts(rows) -> set:
         key = (date_val, time_val)
         counts[key] = counts.get(key, 0) + 1
     return {k for k, v in counts.items() if v > 1}
+
+
+def clean_phone_number(phone_str: str) -> str:
+    """Removes non-digit characters except leading plus."""
+    if not phone_str:
+        return ""
+    import re
+    cleaned = re.sub(r"[\s\-\(\)\.]", "", str(phone_str))
+    return cleaned
+
+
+def is_valid_phone(phone_str: str) -> bool:
+    """Validates phone number: accepts Syrian formats (09xxxxxxxx, +9639...) or general 8-15 digits."""
+    cleaned = clean_phone_number(phone_str)
+    if not cleaned:
+        return False
+    import re
+    # Digits only check
+    digits = re.sub(r"\D", "", cleaned)
+    if len(digits) < 8 or len(digits) > 15:
+        return False
+    # Common Syrian check: starts with 09 and 10 digits total
+    if cleaned.startswith("09") and len(digits) == 10:
+        return True
+    # Syrian international
+    if (cleaned.startswith("9639") or cleaned.startswith("+9639") or cleaned.startswith("009639")) and len(digits) in (12, 13):
+        return True
+    return len(digits) >= 8
+
+
+def format_whatsapp_url(phone_str: str) -> str | None:
+    """Formats phone number into a direct https://wa.me/... link."""
+    cleaned = clean_phone_number(phone_str)
+    if not cleaned:
+        return None
+    import re
+    if cleaned.startswith("+"):
+        cleaned = cleaned[1:]
+    elif cleaned.startswith("00"):
+        cleaned = cleaned[2:]
+    elif cleaned.startswith("09") and len(re.sub(r"\D", "", cleaned)) == 10:
+        cleaned = "963" + cleaned[1:]
+    
+    digits = re.sub(r"\D", "", cleaned)
+    if len(digits) >= 8:
+        return f"https://wa.me/{digits}"
+    return None
+
+
+def format_telegram_user_link(user_id: int, username: str = None) -> str:
+    """Returns direct telegram link for a user."""
+    if username:
+        clean_user = username.lstrip("@")
+        return f"https://t.me/{clean_user}"
+    return f"tg://user?id={user_id}"

@@ -92,6 +92,7 @@ def admin_dashboard_keyboard(role="مستخدم عادي"):
     
     if role == "مشرف":
         keyboard.append([
+            InlineKeyboardButton("🩺 صحة النظام", callback_data="admin_health_check"),
             InlineKeyboardButton("📜 سجل العمليات", callback_data="admin_audit_logs")
         ])
         keyboard.append([

@@ -28,6 +28,7 @@ class State(IntEnum):
 class CaptionState(IntEnum):
     TYPING_PROMPT  = auto()   # المستخدم يكتب النص / البرومبت
     CHOOSING_TASK  = auto()   # يختار نوع المهمة (كابشن، تدقيق، هاشتاغ...)
+    CHOOSING_TONE  = auto()   # يختار نبرة الصوت (رسمي، حماسي، صحفي...)
     CHOOSING_MODEL = auto()   # يختار نموذج الذكاء
     EDITING        = auto()   # يطلب تعديل
 

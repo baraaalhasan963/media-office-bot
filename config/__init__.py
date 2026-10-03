@@ -26,3 +26,12 @@ if ADMIN_USERS_IDS_raw:
 DB_PATH = os.getenv("DB_PATH", "bot_database.db")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+
+DOSE_CHAT_ID = os.getenv("DOSE_CHAT_ID", ADMIN_CHAT_ID)
+DOSE_TOPIC_ID_raw = os.getenv("DOSE_TOPIC_ID", "")
+DOSE_TOPIC_ID = int(DOSE_TOPIC_ID_raw) if DOSE_TOPIC_ID_raw and DOSE_TOPIC_ID_raw != "None" else ADMIN_TOPIC_ID
+
+SQLITE_BUSY_TIMEOUT = int(os.getenv("SQLITE_BUSY_TIMEOUT", "15000"))
+HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "60.0"))
+PROXY_URL = os.getenv("PROXY_URL") or os.getenv("HTTPS_PROXY") or os.getenv("HTTP_PROXY") or ""
+

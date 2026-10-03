@@ -19,8 +19,15 @@ async def get_db() -> aiosqlite.Connection:
         _db_connection = await aiosqlite.connect(config.DB_PATH)
         _db_connection.row_factory = aiosqlite.Row
         await _db_connection.execute("PRAGMA journal_mode=WAL;")
+        busy_timeout = getattr(config, "SQLITE_BUSY_TIMEOUT", 15000)
+        await _db_connection.execute(f"PRAGMA busy_timeout = {busy_timeout};")
+        await _db_connection.execute("PRAGMA synchronous = NORMAL;")
+        await _db_connection.execute("PRAGMA temp_store = MEMORY;")
+        await _db_connection.execute("PRAGMA cache_size = -10000;")
+        await _db_connection.execute("PRAGMA mmap_size = 30000000;")
         _db_lock = asyncio.Lock()
     return _db_connection
+
 
 async def close_db():
     global _db_connection
@@ -218,7 +225,9 @@ async def init_db():
         "departments": json.dumps(constants.DEPARTMENTS, ensure_ascii=False),
         "event_types": json.dumps(constants.EVENT_TYPES, ensure_ascii=False),
         "coverage_options": json.dumps(constants.COVERAGE_OPTIONS, ensure_ascii=False),
-        "importance_levels": json.dumps(constants.IMPORTANCE_LEVELS, ensure_ascii=False)
+        "importance_levels": json.dumps(constants.IMPORTANCE_LEVELS, ensure_ascii=False),
+        "borrow_items": json.dumps(constants.BORROW_ITEMS, ensure_ascii=False),
+        "borrow_item_stock": json.dumps(constants.BORROW_ITEM_STOCK, ensure_ascii=False),
     }
     for key, val in default_settings.items():
         await db.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (key, val))
@@ -396,6 +405,25 @@ async def get_request_by_id(req_id: str):
     async with db.execute("SELECT * FROM requests WHERE id = ?", (req_id,)) as cursor:
         return await cursor.fetchone()
 
+
+async def search_requests(query_str: str, limit: int = 10) -> list:
+    """البحث في الطلبات بواسطة المعرف أو اسم الفعالية أو القسم أو اسم جهة الاتصال."""
+    db = await get_db()
+    clean_q = query_str.strip()
+    pattern = f"%{clean_q}%"
+    async with db.execute(
+        """SELECT * FROM requests 
+           WHERE id = ? 
+              OR id LIKE ? 
+              OR event_name LIKE ? 
+              OR department LIKE ? 
+              OR contact_name LIKE ? 
+              OR location LIKE ?
+           ORDER BY timestamp DESC LIMIT ?""",
+        (clean_q, pattern, pattern, pattern, pattern, pattern, limit)
+    ) as cursor:
+        return await cursor.fetchall()
+
 async def get_user_by_id(user_id: int):
     db = await get_db()
     async with db.execute(
@@ -495,8 +523,11 @@ async def get_importance_levels():
 
 # --- Admin Roles ---
 async def get_user_role(user_id: int):
-    if user_id in config.ADMIN_USERS_IDS:
-        return "مشرف"
+    try:
+        if int(user_id) in config.ADMIN_USERS_IDS:
+            return "مشرف"
+    except (ValueError, TypeError):
+        pass
     return "مستخدم عادي"
 
 # --- Audit Logs ---
@@ -532,3 +563,225 @@ def check_rate_limit(user_id: int) -> bool:
         return False
     _RATE_LIMIT_CACHE[user_id] = now
     return True
+
+
+# --- Centralized Query & Operation Helpers ---
+
+async def generate_next_request_id() -> str:
+    db = await get_db()
+    async with _db_lock:
+        async with db.execute("SELECT MAX(CAST(id AS INTEGER)) FROM requests") as cursor:
+            row = await cursor.fetchone()
+            max_id = row[0] if (row and row[0] is not None) else 0
+            return str(max_id + 1)
+
+async def get_dashboard_statistics() -> tuple:
+    db = await get_db()
+    async with db.execute("SELECT COUNT(*) FROM requests") as c:
+        total = (await c.fetchone())[0]
+    async with db.execute("SELECT COUNT(*) FROM requests WHERE status = 'معلق'") as c:
+        pending = (await c.fetchone())[0]
+    async with db.execute("SELECT COUNT(*) FROM requests WHERE status = 'مقبول'") as c:
+        approved = (await c.fetchone())[0]
+    async with db.execute("SELECT COUNT(*) FROM requests WHERE status = 'مرفوض'") as c:
+        rejected = (await c.fetchone())[0]
+    return total, pending, approved, rejected
+
+async def get_upcoming_approved_coverages(today_str: str):
+    db = await get_db()
+    async with db.execute(
+        "SELECT * FROM requests WHERE status = 'مقبول' AND request_type = 'تغطية' AND date >= ? ORDER BY date ASC, time ASC",
+        (today_str,)
+    ) as cursor:
+        return await cursor.fetchall()
+
+async def get_pending_coverages(today_str: str, limit: int = 10):
+    db = await get_db()
+    async with db.execute(
+        "SELECT * FROM requests WHERE status = 'معلق' AND date >= ? ORDER BY date ASC, time ASC LIMIT ?",
+        (today_str, limit)
+    ) as cursor:
+        return await cursor.fetchall()
+
+async def get_total_pending_count() -> int:
+    db = await get_db()
+    async with db.execute("SELECT COUNT(*) FROM requests WHERE status = 'معلق'") as c:
+        row = await c.fetchone()
+        return row[0] if row else 0
+
+async def get_events_for_pre_reminder(today_str: str, window_start: str, window_end: str):
+    db = await get_db()
+    async with db.execute(
+        "SELECT * FROM requests WHERE status = 'مقبول' AND request_type = 'تغطية' AND date = ? AND start_time_24 BETWEEN ? AND ?",
+        (today_str, window_start, window_end)
+    ) as cursor:
+        return await cursor.fetchall()
+
+async def get_all_borrow_requests():
+    db = await get_db()
+    async with db.execute(
+        "SELECT * FROM requests WHERE request_type = 'استعارة' ORDER BY date ASC, time ASC"
+    ) as cursor:
+        return await cursor.fetchall()
+
+async def get_requests_by_date_range(date_from: str, date_to: str):
+    db = await get_db()
+    async with db.execute(
+        "SELECT * FROM requests WHERE date BETWEEN ? AND ? ORDER BY date ASC, time ASC",
+        (date_from, date_to)
+    ) as cursor:
+        return await cursor.fetchall()
+
+async def get_requests_by_department(dept_name: str, limit: int = 15):
+    db = await get_db()
+    async with db.execute(
+        "SELECT * FROM requests WHERE department = ? ORDER BY date DESC LIMIT ?",
+        (dept_name, limit)
+    ) as cursor:
+        return await cursor.fetchall()
+
+async def get_admin_filtered_requests(filter_type: str, limit: int = 10, today_str: str = None):
+    db = await get_db()
+    if filter_type == "upcoming":
+        sql = "SELECT * FROM requests WHERE status = 'مقبول' AND request_type = 'تغطية' AND date >= ? ORDER BY date ASC, time ASC"
+        params = (today_str,)
+    elif filter_type == "today":
+        sql = "SELECT * FROM requests WHERE status = 'مقبول' AND request_type = 'تغطية' AND date = ? ORDER BY time ASC"
+        params = (today_str,)
+    elif filter_type == "tomorrow":
+        sql = "SELECT * FROM requests WHERE status = 'مقبول' AND request_type = 'تغطية' AND date = ? ORDER BY time ASC"
+        params = (today_str,)
+    elif filter_type == "pending":
+        sql = "SELECT * FROM requests WHERE status = 'معلق' ORDER BY date ASC, time ASC LIMIT ?"
+        params = (limit,)
+    elif filter_type == "accepted":
+        sql = "SELECT * FROM requests WHERE status = 'مقبول' ORDER BY date DESC, time DESC LIMIT ?"
+        params = (limit,)
+    elif filter_type == "rejected":
+        sql = "SELECT * FROM requests WHERE status = 'مرفوض' ORDER BY date DESC, time DESC LIMIT ?"
+        params = (limit,)
+    else:
+        sql = "SELECT * FROM requests ORDER BY date DESC, time DESC LIMIT ?"
+        params = (limit,)
+    async with db.execute(sql, params) as cursor:
+        return await cursor.fetchall()
+
+async def update_request_status(req_id: str, status: str, admin_id: int = None, admin_username: str = None):
+    db = await get_db()
+    async with _db_lock:
+        await db.execute(
+            "UPDATE requests SET status = ?, admin_id = ?, admin_username = ? WHERE id = ?",
+            (status, admin_id, admin_username, req_id)
+        )
+        await db.commit()
+
+async def delete_request(req_id: str, user_id: int = None) -> bool:
+    db = await get_db()
+    async with _db_lock:
+        if user_id:
+            await db.execute("DELETE FROM requests WHERE id = ? AND user_id = ?", (req_id, user_id))
+        else:
+            await db.execute("DELETE FROM requests WHERE id = ?", (req_id,))
+        await db.commit()
+        return True
+
+async def update_request_field(req_id: str, field: str, value: str):
+    allowed_fields = {
+        "department", "event_name", "event_type", "objective", "date",
+        "time", "end_time", "location", "coverage_type", "importance",
+        "external_media", "notes", "contact_name", "phone", "telegram"
+    }
+    if field not in allowed_fields:
+        raise ValueError(f"Invalid field name: {field}")
+    db = await get_db()
+    async with _db_lock:
+        await db.execute(f"UPDATE requests SET {field} = ? WHERE id = ?", (value, req_id))
+        if field == "time":
+            await db.execute("UPDATE requests SET start_time_24 = ? WHERE id = ?", (time_to_24(value), req_id))
+        elif field == "end_time":
+            await db.execute("UPDATE requests SET end_time_24 = ? WHERE id = ?", (time_to_24(value), req_id))
+        await db.commit()
+
+async def get_kpi_report_data():
+    db = await get_db()
+    async with db.execute("SELECT COUNT(*) FROM requests") as c:
+        total_all = (await c.fetchone())[0]
+    async with db.execute("SELECT status, COUNT(*) FROM requests GROUP BY status") as c:
+        status_counts = dict(await c.fetchall())
+    async with db.execute(
+        """SELECT strftime('%Y-%m', date) as m, COUNT(*) 
+           FROM requests 
+           WHERE date IS NOT NULL AND date != '' 
+           GROUP BY m ORDER BY m DESC LIMIT 6"""
+    ) as c:
+        monthly_trend = await c.fetchall()
+    async with db.execute(
+        """SELECT department, status, COUNT(*) as cnt 
+           FROM requests 
+           WHERE department != '' AND department IS NOT NULL 
+           GROUP BY department, status"""
+    ) as c:
+        dept_status_rows = await c.fetchall()
+    async with db.execute(
+        """SELECT department, COUNT(*) as cnt 
+           FROM requests 
+           WHERE department != '' AND department IS NOT NULL 
+           GROUP BY department ORDER BY cnt DESC"""
+    ) as c:
+        dept_total_rows = await c.fetchall()
+    async with db.execute(
+        """SELECT event_name as item, status, SUM(borrow_qty) as total_qty, COUNT(*) as cnt 
+           FROM requests 
+           WHERE request_type = 'استعارة' 
+           GROUP BY event_name, status"""
+    ) as c:
+        borrow_rows = await c.fetchall()
+    return {
+        "total_all": total_all,
+        "status_counts": status_counts,
+        "monthly_trend": monthly_trend,
+        "dept_status_rows": dept_status_rows,
+        "dept_total_rows": dept_total_rows,
+        "borrow_rows": borrow_rows,
+    }
+
+async def get_borrow_items() -> list:
+    cached = _cache_get("borrow_items")
+    if cached is not None:
+        return list(cached)
+    import constants
+    val = await get_setting("borrow_items")
+    if val:
+        try:
+            data = json.loads(val)
+            _cache_set("borrow_items", list(data))
+            return list(data)
+        except Exception:
+            pass
+    _cache_set("borrow_items", list(constants.BORROW_ITEMS))
+    return list(constants.BORROW_ITEMS)
+
+async def save_borrow_items(items: list):
+    await set_setting("borrow_items", json.dumps(items, ensure_ascii=False))
+    _cache_invalidate("borrow_items")
+
+async def get_borrow_item_stock() -> dict:
+    cached = _cache_get("borrow_item_stock")
+    if cached is not None:
+        return dict(cached)
+    import constants
+    val = await get_setting("borrow_item_stock")
+    if val:
+        try:
+            data = json.loads(val)
+            _cache_set("borrow_item_stock", dict(data))
+            return dict(data)
+        except Exception:
+            pass
+    _cache_set("borrow_item_stock", dict(constants.BORROW_ITEM_STOCK))
+    return dict(constants.BORROW_ITEM_STOCK)
+
+async def save_borrow_item_stock(stock: dict):
+    await set_setting("borrow_item_stock", json.dumps(stock, ensure_ascii=False))
+    _cache_invalidate("borrow_item_stock")
+
